@@ -26,6 +26,7 @@
 ;;
 ;; M-x gnus-bone-highlight RET will highlight BARK reports
 ;; M-x gnus-bone-clear RET will unhighlight BARK reports
+;; M-x gnus-bone-limit RET will limit summary to BARK reports + highlight
 ;;
 ;;; Code:
 
@@ -34,29 +35,16 @@
 (defvar gnus-bone-sources-file "~/.config/bone/sources.json"
   "Path to bone sources.json, a JSON array of reports.json URIs.")
 
-(defface gnus-bone-bug-face
-  '((t :foreground "red" :weight bold))
-  "Face for BONE bug reports in Gnus summary."
+(defface gnus-bone-face
+  '((((background light)) :background "#dddddd")
+    (((background dark))  :background "#bbbbbb"))
+  "Subtle highlight for BARK reports in Gnus summary.
+Lighter variant of `hl-line' to avoid clashing."
   :group 'gnus-bone)
 
-(defface gnus-bone-patch-face
-  '((t :foreground "blue" :weight bold))
-  "Face for BONE patch reports in Gnus summary."
-  :group 'gnus-bone)
-
-(defface gnus-bone-request-face
-  '((t :foreground "orange" :weight bold))
-  "Face for BONE request reports in Gnus summary."
-  :group 'gnus-bone)
-
-(defface gnus-bone-acked-face
-  '((t :slant italic))
-  "Additional face for acked BONE reports."
-  :group 'gnus-bone)
-
-(defface gnus-bone-owned-face
-  '((t :weight ultra-bold))
-  "Additional face for owned BONE reports."
+(defface gnus-bone-annotation-face
+  '((t :inherit shadow))
+  "Face for right-margin annotations (type, flags, priority, votes)."
   :group 'gnus-bone)
 
 (defconst gnus-bone-supported-format-version "0.1.0"
@@ -75,7 +63,8 @@
             (json-read-file (expand-file-name gnus-bone-sources-file)))))
 
 (defun gnus-bone--extract-open-reports (reports-file)
-  "Extract (message-id type flags) lists for open reports from REPORTS-FILE.
+  "Extract report plists for open reports from REPORTS-FILE.
+Each entry is (MESSAGE-ID . (:type T :flags F :priority P :votes V)).
 A report is open when its status is >= 4."
   (let* ((json-object-type 'alist)
          (json-array-type 'list)
@@ -87,32 +76,22 @@ A report is open when its status is >= 4."
       (message "gnus-bone: %s has format-version %s, supported is %s"
                reports-file fv gnus-bone-supported-format-version))
     (dolist (r reports result)
-      (let ((mid    (alist-get 'message-id r))
-            (status (alist-get 'status r))
-            (type   (alist-get 'type r))
-            (flags  (alist-get 'flags r)))
+      (let ((mid      (alist-get 'message-id r))
+            (status   (alist-get 'status r))
+            (type     (alist-get 'type r))
+            (flags    (alist-get 'flags r))
+            (priority (alist-get 'priority r))
+            (votes    (alist-get 'votes r)))
         (when (and mid (numberp status) (>= status 4))
-          (push (list mid (or type "bug") (or flags "---")) result))))))
+          (push (cons mid (list :type (or type "bug")
+                                :flags (or flags "---")
+                                :priority (or priority 0)
+                                :votes votes))
+                result))))))
 
 (defun gnus-bone--load-all-open-reports ()
-  "Collect open (message-id type flags) lists from all sources."
+  "Collect open (message-id . plist) pairs from all sources."
   (mapcan #'gnus-bone--extract-open-reports (gnus-bone--load-sources)))
-
-(defun gnus-bone--type-face (type)
-  "Return the face for report TYPE."
-  (pcase type
-    ("patch"   'gnus-bone-patch-face)
-    ("request" 'gnus-bone-request-face)
-    (_         'gnus-bone-bug-face)))
-
-(defun gnus-bone--flags-faces (flags)
-  "Return extra faces based on FLAGS string."
-  (let ((extra '()))
-    (when (and (>= (length flags) 1) (eq (aref flags 0) ?a))
-      (push 'gnus-bone-acked-face extra))
-    (when (and (>= (length flags) 2) (eq (aref flags 1) ?o))
-      (push 'gnus-bone-owned-face extra))
-    extra))
 
 (defun gnus-bone--normalize-mid (mid)
   "Ensure MID is bracketed."
@@ -120,8 +99,28 @@ A report is open when its status is >= 4."
       mid
     (concat "<" mid ">")))
 
+(defvar gnus-bone-votes-width 7
+  "Fixed width for the votes column (e.g. \"[1/1]  \" or \"       \").
+Increase if you expect votes like [12/34].")
+
+(defun gnus-bone--annotation (info)
+  "Build a fixed-width annotation string from report INFO plist."
+  (let* ((type     (plist-get info :type))
+         (flags    (plist-get info :flags))
+         (priority (plist-get info :priority))
+         (votes    (plist-get info :votes))
+         (pri-str  (format "P%d" priority))
+         (votes-str (if votes
+                        (format "[%s]" votes)
+                      ""))
+         (votes-pad (format (format "%%-%ds" gnus-bone-votes-width) votes-str))
+         (tag       (concat (format "%-7s %s " type flags) pri-str " " votes-pad)))
+    tag))
+
 (defun gnus-bone--apply-overlays (reports)
-  "Apply overlays for REPORTS, a list of (message-id type flags)."
+  "Apply overlays for REPORTS, a list of (message-id . plist).
+The annotation replaces the rightmost columns of each line,
+so it is always visible regardless of margins."
   (let ((id-map (make-hash-table :test 'equal)))
     (dolist (r reports)
       (puthash (gnus-bone--normalize-mid (car r)) (cdr r) id-map))
@@ -135,24 +134,74 @@ A report is open when its status is >= 4."
                (mid     (and header (mail-header-id header)))
                (info    (and mid (gethash mid id-map))))
           (when info
-            (let* ((type  (car info))
-                   (flags (cadr info))
-                   (face  (gnus-bone--type-face type))
-                   (extra (gnus-bone--flags-faces flags))
-                   (ov    (make-overlay (line-beginning-position)
-                                        (line-end-position))))
-              (overlay-put ov 'face (cons face extra))
-              (overlay-put ov 'gnus-bone t))))
+            (let* ((bol     (line-beginning-position))
+                   (eol     (line-end-position))
+                   (ann-str (gnus-bone--annotation info))
+                   (ann-len (length ann-str))
+                   (p3      (= 3 (plist-get info :priority)))
+                   (face    (if p3 '(gnus-bone-face bold) 'gnus-bone-face))
+                   ;; Background overlay on full line
+                   (ov-bg   (make-overlay bol eol))
+                   ;; Find where to start the annotation: ann-len + 1 gap
+                   ;; chars before eol, but don't go before bol
+                   (tag-len (+ ann-len 1))
+                   (start   (max bol (- eol tag-len)))
+                   (ov-ann  (make-overlay start eol)))
+              (overlay-put ov-bg 'face face)
+              (overlay-put ov-bg 'gnus-bone t)
+              (overlay-put ov-ann 'display
+                           (propertize (concat " " ann-str)
+                                       'face 'gnus-bone-annotation-face))
+              (overlay-put ov-ann 'gnus-bone t))))
         (forward-line 1)))))
 
 (defun gnus-bone-highlight ()
-  "Highlight summary lines whose message-id appears in open BONE reports."
+  "Highlight summary lines whose message-id appears in open BARK reports."
   (interactive)
   (let ((reports (gnus-bone--load-all-open-reports)))
-    (when reports
-      (gnus-bone--apply-overlays reports))))
+    (if (null reports)
+        (message "No open BARK reports found.")
+      (gnus-bone--apply-overlays reports)
+      (message "Highlighted %d BARK reports." (length reports)))))
+
+(defun gnus-bone--matching-articles (reports)
+  "Return article numbers in current summary matching REPORTS."
+  (let ((id-map (make-hash-table :test 'equal))
+        (articles nil))
+    (dolist (r reports)
+      (puthash (gnus-bone--normalize-mid (car r)) t id-map))
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let* ((article (gnus-summary-article-number))
+               (header  (and (numberp article)
+                             (> article 0)
+                             (gnus-summary-article-header article)))
+               (mid     (and header (mail-header-id header))))
+          (when (and mid (gethash mid id-map))
+            (push article articles)))
+        (forward-line 1)))
+    (nreverse articles)))
+
+(defun gnus-bone-limit ()
+  "Limit Gnus summary to open BARK reports, then highlight them.
+Use `gnus-summary-pop-limit' (\\[gnus-summary-pop-limit]) to restore."
+  (interactive)
+  (let ((reports (gnus-bone--load-all-open-reports)))
+    (if (null reports)
+        (message "No open BARK reports found.")
+      (let ((articles (gnus-bone--matching-articles reports)))
+        (if (null articles)
+            (message "No matching articles in this summary.")
+          (gnus-summary-limit articles)
+          (gnus-bone-clear)
+          (gnus-bone--apply-overlays reports)
+          (message "Limited to %d BARK reports." (length articles)))))))
 
 (defun gnus-bone-clear ()
   "Remove all gnus-bone overlays."
   (interactive)
   (remove-overlays (point-min) (point-max) 'gnus-bone t))
+
+(provide 'gnus-bone)
+;;; gnus-bone.el ends here
