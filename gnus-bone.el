@@ -24,9 +24,9 @@
 ;;
 ;;; Commentary:
 ;;
-;; M-x gnus-bone-highlight RET will highlight BARK reports
-;; M-x gnus-bone-clear RET will unhighlight BARK reports
-;; M-x gnus-bone-limit RET will limit summary to BARK reports + highlight
+;; M-x gnus-bone RET will limit summary to BARK reports + highlight
+;; M-x gnus-bone-highlight RET will highlight BARK reports (no limit)
+;; M-x gnus-bone-clear RET will unhighlight and disable auto-rehighlight
 ;;
 ;;; Code:
 
@@ -103,9 +103,20 @@ A report is open when its status is >= 4."
   "Fixed width for the votes column (e.g. \"[1/1]  \" or \"       \").
 Increase if you expect votes like [12/34].")
 
+(defun gnus-bone--type-letter (type)
+  "Return a single-letter abbreviation for report TYPE."
+  (pcase type
+    ("bug"          "B")
+    ("patch"        "P")
+    ("request"      "?")
+    ("announcement" "A")
+    ("release"      "R")
+    ("change"       "C")
+    (_              "·")))
+
 (defun gnus-bone--annotation (info)
   "Build a fixed-width annotation string from report INFO plist."
-  (let* ((type     (plist-get info :type))
+  (let* ((type     (gnus-bone--type-letter (plist-get info :type)))
          (flags    (plist-get info :flags))
          (priority (plist-get info :priority))
          (votes    (plist-get info :votes))
@@ -114,7 +125,7 @@ Increase if you expect votes like [12/34].")
                         (format "[%s]" votes)
                       ""))
          (votes-pad (format (format "%%-%ds" gnus-bone-votes-width) votes-str))
-         (tag       (concat (format "%-7s %s " type flags) pri-str " " votes-pad)))
+         (tag       (concat type " " flags " " pri-str " " votes-pad)))
     tag))
 
 (defun gnus-bone--apply-overlays (reports)
@@ -155,13 +166,36 @@ so it is always visible regardless of margins."
               (overlay-put ov-ann 'gnus-bone t))))
         (forward-line 1)))))
 
+(defvar-local gnus-bone--active-reports nil
+  "Buffer-local cache of BARK reports for auto-rehighlighting.
+Set by `gnus-bone' and `gnus-bone-highlight', cleared by `gnus-bone-clear'.")
+
+(defun gnus-bone--rehighlight (&rest _args)
+  "Re-apply BARK overlays after summary buffer changes.
+Intended for `gnus-summary-prepared-hook' and `gnus-summary-update-hook'."
+  (when gnus-bone--active-reports
+    (gnus-bone--apply-overlays gnus-bone--active-reports)))
+
+(defun gnus-bone--enable-hooks ()
+  "Enable auto-rehighlighting hooks in the current summary buffer."
+  (add-hook 'gnus-summary-prepared-hook #'gnus-bone--rehighlight nil t)
+  (add-hook 'gnus-summary-update-hook #'gnus-bone--rehighlight nil t))
+
+(defun gnus-bone--disable-hooks ()
+  "Disable auto-rehighlighting hooks in the current summary buffer."
+  (remove-hook 'gnus-summary-prepared-hook #'gnus-bone--rehighlight t)
+  (remove-hook 'gnus-summary-update-hook #'gnus-bone--rehighlight t))
+
 (defun gnus-bone-highlight ()
-  "Highlight summary lines whose message-id appears in open BARK reports."
+  "Highlight summary lines whose message-id appears in open BARK reports.
+Highlighting persists across `A T' and other summary updates."
   (interactive)
   (let ((reports (gnus-bone--load-all-open-reports)))
     (if (null reports)
         (message "No open BARK reports found.")
+      (setq gnus-bone--active-reports reports)
       (gnus-bone--apply-overlays reports)
+      (gnus-bone--enable-hooks)
       (message "Highlighted %d BARK reports." (length reports)))))
 
 (defun gnus-bone--matching-articles (reports)
@@ -183,8 +217,9 @@ so it is always visible regardless of margins."
         (forward-line 1)))
     (nreverse articles)))
 
-(defun gnus-bone-limit ()
+(defun gnus-bone ()
   "Limit Gnus summary to open BARK reports, then highlight them.
+Highlighting persists across `A T' and other summary updates.
 Use `gnus-summary-pop-limit' (\\[gnus-summary-pop-limit]) to restore."
   (interactive)
   (let ((reports (gnus-bone--load-all-open-reports)))
@@ -195,13 +230,17 @@ Use `gnus-summary-pop-limit' (\\[gnus-summary-pop-limit]) to restore."
             (message "No matching articles in this summary.")
           (gnus-summary-limit articles)
           (gnus-bone-clear)
+          (setq gnus-bone--active-reports reports)
           (gnus-bone--apply-overlays reports)
+          (gnus-bone--enable-hooks)
           (message "Limited to %d BARK reports." (length articles)))))))
 
 (defun gnus-bone-clear ()
-  "Remove all gnus-bone overlays."
+  "Remove all gnus-bone overlays and disable auto-rehighlighting."
   (interactive)
-  (remove-overlays (point-min) (point-max) 'gnus-bone t))
+  (remove-overlays (point-min) (point-max) 'gnus-bone t)
+  (setq gnus-bone--active-reports nil)
+  (gnus-bone--disable-hooks))
 
 (provide 'gnus-bone)
 ;;; gnus-bone.el ends here
