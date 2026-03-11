@@ -47,7 +47,7 @@ Lighter variant of `hl-line' to avoid clashing."
   "Face for right-margin annotations (type, flags, priority, votes)."
   :group 'gnus-bone)
 
-(defconst gnus-bone-supported-format-version "0.1.0"
+(defconst gnus-bone-supported-format-version "0.2.0"
   "Supported BONE reports.json format-version.")
 
 (defun gnus-bone--uri-to-path (uri)
@@ -81,12 +81,16 @@ A report is open when its status is >= 4."
             (type     (alist-get 'type r))
             (flags    (alist-get 'flags r))
             (priority (alist-get 'priority r))
-            (votes    (alist-get 'votes r)))
+            (votes    (alist-get 'votes r))
+            (deadline (alist-get 'deadline r))
+            (topic    (alist-get 'topic r)))
         (when (and mid (numberp status) (>= status 4))
           (push (cons mid (list :type (or type "bug")
                                 :flags (or flags "---")
                                 :priority (or priority 0)
-                                :votes votes))
+                                :votes votes
+                                :deadline deadline
+                                :topic topic))
                 result))))))
 
 (defun gnus-bone--load-all-open-reports ()
@@ -103,6 +107,9 @@ A report is open when its status is >= 4."
   "Fixed width for the votes column (e.g. \"[1/1]  \" or \"       \").
 Increase if you expect votes like [12/34].")
 
+(defvar gnus-bone-deadline-width 5
+  "Fixed width for the deadline column (e.g. \"D-2  \" or \"     \").")
+
 (defun gnus-bone--type-letter (type)
   "Return a single-letter abbreviation for report TYPE."
   (pcase type
@@ -114,18 +121,29 @@ Increase if you expect votes like [12/34].")
     ("change"       "C")
     (_              "·")))
 
+(defun gnus-bone--deadline-days (deadline)
+  "Return days until DEADLINE (a \"YYYY-MM-DD\" string), or nil."
+  (when deadline
+    (let* ((dl (date-to-time (concat deadline " 00:00:00")))
+           (diff (float-time (time-subtract dl (current-time)))))
+      (ceiling (/ diff 86400.0)))))
+
 (defun gnus-bone--annotation (info)
   "Build a fixed-width annotation string from report INFO plist."
   (let* ((type     (gnus-bone--type-letter (plist-get info :type)))
          (flags    (plist-get info :flags))
          (priority (plist-get info :priority))
          (votes    (plist-get info :votes))
+         (deadline (plist-get info :deadline))
+         (days    (gnus-bone--deadline-days deadline))
          (pri-str  (format "P%d" priority))
+         (dl-str   (if days (format "D%+d" (- days)) ""))
+         (dl-pad   (format (format "%%-%ds" gnus-bone-deadline-width) dl-str))
          (votes-str (if votes
                         (format "[%s]" votes)
                       ""))
          (votes-pad (format (format "%%-%ds" gnus-bone-votes-width) votes-str))
-         (tag       (concat type " " flags " " pri-str " " votes-pad)))
+         (tag       (concat type " " flags " " pri-str " " dl-pad votes-pad)))
     tag))
 
 (defun gnus-bone--apply-overlays (reports)
@@ -234,6 +252,40 @@ Use `gnus-summary-pop-limit' (\\[gnus-summary-pop-limit]) to restore."
           (gnus-bone--apply-overlays reports)
           (gnus-bone--enable-hooks)
           (message "Limited to %d BARK reports." (length articles)))))))
+
+(defun gnus-bone--collect-topics (reports)
+  "Return sorted list of unique topics from REPORTS."
+  (let ((topics nil))
+    (dolist (r reports)
+      (when-let ((topic (plist-get (cdr r) :topic)))
+        (cl-pushnew topic topics :test #'equal)))
+    (sort topics #'string<)))
+
+(defun gnus-bone--filter-by-topic (reports topic)
+  "Return REPORTS whose :topic equals TOPIC."
+  (cl-remove-if-not (lambda (r) (equal (plist-get (cdr r) :topic) topic))
+                     reports))
+
+(defun gnus-bone-topic ()
+  "Like `gnus-bone', but limited to a single topic.
+Completes over topics found in the BARK JSON sources."
+  (interactive)
+  (let* ((reports (gnus-bone--load-all-open-reports))
+         (topics  (gnus-bone--collect-topics reports))
+         (topic   (completing-read "BARK topic: " topics nil t)))
+    (if (string-empty-p topic)
+        (message "No topic selected.")
+      (let* ((filtered (gnus-bone--filter-by-topic reports topic))
+             (articles (and filtered (gnus-bone--matching-articles filtered))))
+        (if (null articles)
+            (message "No matching articles for topic \"%s\"." topic)
+          (gnus-summary-limit articles)
+          (gnus-bone-clear)
+          (setq gnus-bone--active-reports filtered)
+          (gnus-bone--apply-overlays filtered)
+          (gnus-bone--enable-hooks)
+          (message "Limited to %d BARK reports for topic \"%s\"."
+                   (length articles) topic))))))
 
 (defun gnus-bone-clear ()
   "Remove all gnus-bone overlays and disable auto-rehighlighting."
