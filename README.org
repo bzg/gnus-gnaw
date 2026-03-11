@@ -7,31 +7,13 @@ open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.
 
 - =~/.config/bone/sources.json= (a JSON array of =reports.json= paths or
   URLs, shared with bone)
-- =gnus-bone= supports =reports.json= format-version =0.1.0=.
-
-** Installation
-
-Copy =gnus-bone.el= somewhere in your =load-path=, then:
-
-#+begin_src emacs-lisp
-(require 'gnus-bone)
-(add-hook 'gnus-summary-prepared-hook #'gnus-bone-highlight)
-#+end_src
-
-** Faces
-
-| Face                   | Default      | Applies to               |
-|------------------------+--------------+--------------------------|
-| =gnus-bone-bug-face=     | red, bold    | Bug reports              |
-| =gnus-bone-patch-face=   | blue, bold   | Patch reports            |
-| =gnus-bone-request-face= | orange, bold | Feature requests / polls |
-| =gnus-bone-acked-face=   | italic       | Acked reports (flag =a=)   |
-| =gnus-bone-owned-face=   | ultra-bold   | Owned reports (flag =o=)   |
+- =gnus-bone= supports =reports.json= format-version =0.2.0=.
 
 ** Commands
 
-- =M-x gnus-bone-highlight= — Apply overlays to the current summary buffer.
+- =M-x gnus-bone= — Apply overlays to the current summary buffer.
 - =M-x gnus-bone-clear= — Remove all =gnus-bone= overlays.
+- =M-x gnus-bone-topic= — Filter reports by selected topic.
 
 ** License
 
