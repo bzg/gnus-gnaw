@@ -47,7 +47,7 @@ Lighter variant of `hl-line' to avoid clashing."
   "Face for right-margin annotations (type, flags, priority, votes)."
   :group 'gnus-bone)
 
-(defconst gnus-bone-supported-format-version "0.2.0"
+(defconst gnus-bone-supported-format-version "0.2.2"
   "Supported BONE reports.json format-version.")
 
 (defun gnus-bone--uri-to-path (uri)
@@ -62,36 +62,61 @@ Lighter variant of `hl-line' to avoid clashing."
     (mapcar #'gnus-bone--uri-to-path
             (json-read-file (expand-file-name gnus-bone-sources-file)))))
 
-(defun gnus-bone--extract-open-reports (reports-file)
-  "Extract report plists for open reports from REPORTS-FILE.
+(defun gnus-bone--http-url-p (source)
+  "Return non-nil if SOURCE is an HTTP(S) URL."
+  (string-match-p "\\`https?://" source))
+
+(defun gnus-bone--read-json (source)
+  "Read JSON from SOURCE, a local path or HTTP(S) URL."
+  (let ((json-object-type 'alist)
+        (json-array-type 'list))
+    (if (gnus-bone--http-url-p source)
+        (with-current-buffer (url-retrieve-synchronously source t)
+          (goto-char (point-min))
+          (re-search-forward "\n\n")
+          (prog1 (json-read)
+            (kill-buffer)))
+      (json-read-file source))))
+
+(defun gnus-bone--extract-open-reports (source)
+  "Extract report plists for open reports from SOURCE.
+SOURCE may be a local file path or an HTTP(S) URL.
 Each entry is (MESSAGE-ID . (:type T :flags F :priority P :votes V)).
 A report is open when its status is >= 4."
-  (let* ((json-object-type 'alist)
-         (json-array-type 'list)
-         (data (json-read-file reports-file))
+  (let* ((data (gnus-bone--read-json source))
          (fv (alist-get 'format-version data))
          (reports (alist-get 'reports data))
          (result '()))
     (when (and fv (not (equal fv gnus-bone-supported-format-version)))
       (message "gnus-bone: %s has format-version %s, supported is %s"
-               reports-file fv gnus-bone-supported-format-version))
+               source fv gnus-bone-supported-format-version))
     (dolist (r reports result)
-      (let ((mid      (alist-get 'message-id r))
-            (status   (alist-get 'status r))
-            (type     (alist-get 'type r))
-            (flags    (alist-get 'flags r))
-            (priority (alist-get 'priority r))
-            (votes    (alist-get 'votes r))
-            (deadline (alist-get 'deadline r))
-            (topic    (alist-get 'topic r)))
+      (let ((mid          (alist-get 'message-id r))
+            (status       (alist-get 'status r))
+            (type         (alist-get 'type r))
+            (acked        (alist-get 'acked r))
+            (owned        (alist-get 'owned r))
+            (closed       (alist-get 'closed r))
+            (close-reason (alist-get 'close-reason r))
+            (priority     (alist-get 'priority r))
+            (votes        (alist-get 'votes r))
+            (deadline     (alist-get 'deadline r))
+            (topic        (alist-get 'topic r)))
         (when (and mid (numberp status) (>= status 4))
-          (push (cons mid (list :type (or type "bug")
-                                :flags (or flags "---")
-                                :priority (or priority 0)
-                                :votes votes
-                                :deadline deadline
-                                :topic topic))
-                result))))))
+          (let ((flags (concat (if acked "A" "-")
+                               (if owned "O" "-")
+                               (pcase close-reason
+                                 ("canceled" "C")
+                                 ("resolved" "R")
+                                 ("expired"  "E")
+                                 (_ (if closed "R" "-"))))))
+            (push (cons mid (list :type (or type "bug")
+                                  :flags flags
+                                  :priority (or priority 0)
+                                  :votes votes
+                                  :deadline deadline
+                                  :topic topic))
+                  result)))))))
 
 (defun gnus-bone--load-all-open-reports ()
   "Collect open (message-id . plist) pairs from all sources."
