@@ -172,7 +172,7 @@ Increase if you expect votes like [12/34].")
          (votes    (plist-get info :votes))
          (deadline (plist-get info :deadline))
          (days    (gnus-bone--deadline-days deadline))
-         (pri-str  (format "P%d" priority))
+         (pri-str  (pcase priority (3 "A") (2 "B") (1 "C") (_ " ")))
          (dl-str   (if days (format "D%+d" days) ""))
          (dl-pad   (string-pad dl-str gnus-bone-deadline-width))
          (votes-str (if votes
