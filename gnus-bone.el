@@ -31,13 +31,20 @@
 ;;; Code:
 
 (require 'json)
+(require 'cl-lib)
+
+(declare-function gnus-summary-article-number "gnus-sum")
+(declare-function gnus-summary-article-header "gnus-sum")
+(declare-function gnus-summary-limit "gnus-sum")
+(declare-function gnus-summary-pop-limit "gnus-sum")
+(declare-function mail-header-id "nnheader")
 
 (defvar gnus-bone-sources-file "~/.config/bone/sources.json"
   "Path to bone sources.json, a JSON array of reports.json URIs.")
 
 (defface gnus-bone-face
-  '((((background light)) :background "#dddddd")
-    (((background dark))  :background "#bbbbbb"))
+  '((((background light)) :background "#e8e8e8")
+    (((background dark))  :background "#333333"))
   "Subtle highlight for BARK reports in Gnus summary.
 Lighter variant of `hl-line' to avoid clashing."
   :group 'gnus-bone)
@@ -51,7 +58,7 @@ Lighter variant of `hl-line' to avoid clashing."
   "Supported BONE reports.json format-version.")
 
 (defun gnus-bone--uri-to-path (uri)
-  "Convert a file:// URI to a local path."
+  "Convert a file:// URI to a local path; pass other URIs through unchanged."
   (if (string-prefix-p "file://" uri)
       (url-unhex-string (substring uri 7))
     uri))
@@ -71,11 +78,15 @@ Lighter variant of `hl-line' to avoid clashing."
   (let ((json-object-type 'alist)
         (json-array-type 'list))
     (if (gnus-bone--http-url-p source)
-        (with-current-buffer (url-retrieve-synchronously source t)
-          (goto-char (point-min))
-          (re-search-forward "\n\n")
-          (prog1 (json-read)
-            (kill-buffer)))
+        (let ((buf (url-retrieve-synchronously source t)))
+          (unless buf (error "gnus-bone: failed to fetch %s" source))
+          (unwind-protect
+              (with-current-buffer buf
+                (goto-char (point-min))
+                (unless (re-search-forward "\n\n" nil t)
+                  (error "gnus-bone: malformed HTTP response from %s" source))
+                (json-read))
+            (kill-buffer buf)))
       (json-read-file source))))
 
 (defun gnus-bone--extract-open-reports (source)
@@ -162,52 +173,64 @@ Increase if you expect votes like [12/34].")
          (deadline (plist-get info :deadline))
          (days    (gnus-bone--deadline-days deadline))
          (pri-str  (format "P%d" priority))
-         (dl-str   (if days (format "D%+d" (- days)) ""))
-         (dl-pad   (format (format "%%-%ds" gnus-bone-deadline-width) dl-str))
+         (dl-str   (if days (format "D%+d" days) ""))
+         (dl-pad   (string-pad dl-str gnus-bone-deadline-width))
          (votes-str (if votes
                         (format "[%s]" votes)
                       ""))
-         (votes-pad (format (format "%%-%ds" gnus-bone-votes-width) votes-str))
+         (votes-pad (string-pad votes-str gnus-bone-votes-width))
          (tag       (concat type " " flags " " pri-str " " dl-pad votes-pad)))
     tag))
+
+(defun gnus-bone--for-each-summary-mid (fn)
+  "Walk every summary line, calling FN with (ARTICLE-NUMBER . MESSAGE-ID).
+FN is only called for lines with a valid article and message-id."
+  (save-excursion
+    (goto-char (point-min))
+    (while (not (eobp))
+      (let* ((article (gnus-summary-article-number))
+             (header  (and (numberp article) (> article 0)
+                           (gnus-summary-article-header article)))
+             (mid     (and header (mail-header-id header))))
+        (when mid (funcall fn article mid)))
+      (forward-line 1))))
+
+(defun gnus-bone--build-mid-map (reports &optional value-fn)
+  "Build a hash-table mapping normalized message-ids from REPORTS.
+VALUE-FN, when given, is called on each (mid . plist) entry to
+produce the hash value; defaults to the plist (cdr)."
+  (let ((id-map (make-hash-table :test 'equal)))
+    (dolist (r reports)
+      (puthash (gnus-bone--normalize-mid (car r))
+               (if value-fn (funcall value-fn r) (cdr r))
+               id-map))
+    id-map))
 
 (defun gnus-bone--apply-overlays (reports)
   "Apply overlays for REPORTS, a list of (message-id . plist).
 The annotation replaces the rightmost columns of each line,
 so it is always visible regardless of margins."
-  (let ((id-map (make-hash-table :test 'equal)))
-    (dolist (r reports)
-      (puthash (gnus-bone--normalize-mid (car r)) (cdr r) id-map))
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let* ((article (gnus-summary-article-number))
-               (header  (and (numberp article)
-                             (> article 0)
-                             (gnus-summary-article-header article)))
-               (mid     (and header (mail-header-id header)))
-               (info    (and mid (gethash mid id-map))))
-          (when info
-            (let* ((bol     (line-beginning-position))
-                   (eol     (line-end-position))
-                   (ann-str (gnus-bone--annotation info))
-                   (ann-len (length ann-str))
-                   (p3      (= 3 (plist-get info :priority)))
-                   (face    (if p3 '(gnus-bone-face bold) 'gnus-bone-face))
-                   ;; Background overlay on full line
-                   (ov-bg   (make-overlay bol eol))
-                   ;; Find where to start the annotation: ann-len + 1 gap
-                   ;; chars before eol, but don't go before bol
-                   (tag-len (+ ann-len 1))
-                   (start   (max bol (- eol tag-len)))
-                   (ov-ann  (make-overlay start eol)))
-              (overlay-put ov-bg 'face face)
-              (overlay-put ov-bg 'gnus-bone t)
-              (overlay-put ov-ann 'display
-                           (propertize (concat " " ann-str)
-                                       'face 'gnus-bone-annotation-face))
-              (overlay-put ov-ann 'gnus-bone t))))
-        (forward-line 1)))))
+  (let ((id-map (gnus-bone--build-mid-map reports)))
+    (gnus-bone--for-each-summary-mid
+     (lambda (_article mid)
+       (let ((info (gethash mid id-map)))
+         (when info
+           (let* ((bol     (line-beginning-position))
+                  (eol     (line-end-position))
+                  (ann-str (gnus-bone--annotation info))
+                  (ann-len (length ann-str))
+                  (p3      (= 3 (plist-get info :priority)))
+                  (face    (if p3 '(gnus-bone-face bold) 'gnus-bone-face))
+                  (ov-bg   (make-overlay bol eol))
+                  (tag-len (+ ann-len 1))
+                  (start   (max bol (- eol tag-len)))
+                  (ov-ann  (make-overlay start eol)))
+             (overlay-put ov-bg 'face face)
+             (overlay-put ov-bg 'gnus-bone t)
+             (overlay-put ov-ann 'display
+                          (propertize (concat " " ann-str)
+                                      'face 'gnus-bone-annotation-face))
+             (overlay-put ov-ann 'gnus-bone t))))))))
 
 (defvar-local gnus-bone--active-reports nil
   "Buffer-local cache of BARK reports for auto-rehighlighting.
@@ -229,6 +252,15 @@ Intended for `gnus-summary-prepared-hook' and `gnus-summary-update-hook'."
   (remove-hook 'gnus-summary-prepared-hook #'gnus-bone--rehighlight t)
   (remove-hook 'gnus-summary-update-hook #'gnus-bone--rehighlight t))
 
+(defun gnus-bone--activate (reports &optional limit-articles)
+  "Clear previous state, apply overlays for REPORTS, enable hooks.
+When LIMIT-ARTICLES is non-nil, limit summary to those articles first."
+  (when limit-articles (gnus-summary-limit limit-articles))
+  (gnus-bone-clear)
+  (setq gnus-bone--active-reports reports)
+  (gnus-bone--apply-overlays reports)
+  (gnus-bone--enable-hooks))
+
 (defun gnus-bone-highlight ()
   "Highlight summary lines whose message-id appears in open BARK reports.
 Highlighting persists across `A T' and other summary updates."
@@ -236,28 +268,17 @@ Highlighting persists across `A T' and other summary updates."
   (let ((reports (gnus-bone--load-all-open-reports)))
     (if (null reports)
         (message "No open BARK reports found.")
-      (setq gnus-bone--active-reports reports)
-      (gnus-bone--apply-overlays reports)
-      (gnus-bone--enable-hooks)
+      (gnus-bone--activate reports)
       (message "Highlighted %d BARK reports." (length reports)))))
 
 (defun gnus-bone--matching-articles (reports)
   "Return article numbers in current summary matching REPORTS."
-  (let ((id-map (make-hash-table :test 'equal))
+  (let ((id-map (gnus-bone--build-mid-map reports (lambda (_) t)))
         (articles nil))
-    (dolist (r reports)
-      (puthash (gnus-bone--normalize-mid (car r)) t id-map))
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let* ((article (gnus-summary-article-number))
-               (header  (and (numberp article)
-                             (> article 0)
-                             (gnus-summary-article-header article)))
-               (mid     (and header (mail-header-id header))))
-          (when (and mid (gethash mid id-map))
-            (push article articles)))
-        (forward-line 1)))
+    (gnus-bone--for-each-summary-mid
+     (lambda (article mid)
+       (when (gethash mid id-map)
+         (push article articles))))
     (nreverse articles)))
 
 (defun gnus-bone ()
@@ -271,11 +292,7 @@ Use `gnus-summary-pop-limit' (\\[gnus-summary-pop-limit]) to restore."
       (let ((articles (gnus-bone--matching-articles reports)))
         (if (null articles)
             (message "No matching articles in this summary.")
-          (gnus-summary-limit articles)
-          (gnus-bone-clear)
-          (setq gnus-bone--active-reports reports)
-          (gnus-bone--apply-overlays reports)
-          (gnus-bone--enable-hooks)
+          (gnus-bone--activate reports articles)
           (message "Limited to %d BARK reports." (length articles)))))))
 
 (defun gnus-bone--collect-topics (reports)
@@ -284,7 +301,7 @@ Use `gnus-summary-pop-limit' (\\[gnus-summary-pop-limit]) to restore."
     (dolist (r reports)
       (when-let ((topic (plist-get (cdr r) :topic)))
         (cl-pushnew topic topics :test #'equal)))
-    (sort topics #'string<)))
+    (sort (copy-sequence topics) #'string<)))
 
 (defun gnus-bone--filter-by-topic (reports topic)
   "Return REPORTS whose :topic equals TOPIC."
@@ -304,11 +321,7 @@ Completes over topics found in the BARK JSON sources."
              (articles (and filtered (gnus-bone--matching-articles filtered))))
         (if (null articles)
             (message "No matching articles for topic \"%s\"." topic)
-          (gnus-summary-limit articles)
-          (gnus-bone-clear)
-          (setq gnus-bone--active-reports filtered)
-          (gnus-bone--apply-overlays filtered)
-          (gnus-bone--enable-hooks)
+          (gnus-bone--activate filtered articles)
           (message "Limited to %d BARK reports for topic \"%s\"."
                    (length articles) topic))))))
 
