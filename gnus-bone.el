@@ -54,8 +54,8 @@ Lighter variant of `hl-line' to avoid clashing."
   "Face for right-margin annotations (type, flags, priority, votes)."
   :group 'gnus-bone)
 
-(defconst gnus-bone-supported-format-version "0.2.2"
-  "Supported BONE reports.json format-version.")
+(defconst gnus-bone-supported-bark-format "0.2.2"
+  "Supported BONE reports.json bark-format.")
 
 (defun gnus-bone--uri-to-path (uri)
   "Convert a file:// URI to a local path; pass other URIs through unchanged."
@@ -95,12 +95,12 @@ SOURCE may be a local file path or an HTTP(S) URL.
 Each entry is (MESSAGE-ID . (:type T :flags F :priority P :votes V)).
 A report is open when its status is >= 4."
   (let* ((data (gnus-bone--read-json source))
-         (fv (alist-get 'format-version data))
+         (fv (alist-get 'bark-format data))
          (reports (alist-get 'reports data))
          (result '()))
-    (when (and fv (not (equal fv gnus-bone-supported-format-version)))
-      (message "gnus-bone: %s has format-version %s, supported is %s"
-               source fv gnus-bone-supported-format-version))
+    (when (and fv (not (equal fv gnus-bone-supported-bark-format)))
+      (message "gnus-bone: %s has bark-format %s, supported is %s"
+               source fv gnus-bone-supported-bark-format))
     (dolist (r reports result)
       (let ((mid          (alist-get 'message-id r))
             (status       (alist-get 'status r))
