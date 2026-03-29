@@ -7,7 +7,7 @@ open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.
 
 - =~/.config/bone/sources.json= (a JSON array of =reports.json= paths or
   URLs, shared with bone)
-- =gnus-bone= supports =reports.json= format-version =0.2.2=.
+- =gnus-bone= supports =reports.json= bark-format =0.4.0=.
 
 ** Commands
 

@@ -54,7 +54,7 @@ Lighter variant of `hl-line' to avoid clashing."
   "Face for right-margin annotations (type, flags, priority, votes)."
   :group 'gnus-bone)
 
-(defconst gnus-bone-supported-bark-format "0.2.4"
+(defconst gnus-bone-supported-bark-format "0.4.0"
   "Minimum supported BONE reports.json bark-format.")
 
 (defun gnus-bone--uri-to-path (uri)
@@ -117,9 +117,10 @@ A report is open when its status is >= 4."
           (let ((flags (concat (if acked "A" "-")
                                (if owned "O" "-")
                                (pcase close-reason
-                                 ("canceled" "C")
-                                 ("resolved" "R")
-                                 ("expired"  "E")
+                                 ("canceled"   "C")
+                                 ("resolved"   "R")
+                                 ("expired"    "E")
+                                 ("superseded" "S")
                                  (_ (if closed "R" "-"))))))
             (push (cons mid (list :type (or type "bug")
                                   :flags flags
