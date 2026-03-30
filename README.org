@@ -22,6 +22,8 @@ open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.
 - Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[FR\] gnus-bone: <FEATURE REQUEST>][feature request]]
 - Share any [[mailto:~bzg/barkyard@lists.sr.ht?subject=gnus-bone: <ANYTHING>][other question or idea]]
 
+You can also [[mailto:bzg@bzg.fr][send me an email]] and support my work on [[https://liberapay.com/bzg/][liberapay]].
+
 * License
 
 Copyright © 2026 Bastien Guerry
