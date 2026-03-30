@@ -1,21 +1,28 @@
-* gnus-bone.el --- Highlight BARK reports in Gnus
+#+title: gnus-bone.el --- Highlight BARK reports in Gnus
 
 =gnus-bone= highlights Gnus summary lines whose =Message-Id= matches an
 open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.json= sources as [[https://codeberg.org/bzg/bone][bone]].
 
-** Requirements
+* Requirements
 
 - =~/.config/bone/sources.json= (a JSON array of =reports.json= paths or
   URLs, shared with bone)
 - =gnus-bone= supports =reports.json= bark-format =0.4.0=.
 
-** Commands
+* Commands
 
 - =M-x gnus-bone= — Apply overlays to the current summary buffer.
 - =M-x gnus-bone-clear= — Remove all =gnus-bone= overlays.
 - =M-x gnus-bone-topic= — Filter reports by selected topic.
 
-** License
+* Contributing
+
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[BUG\] gnus-bone: <SHORT EXPLICIT BUG DESCRIPTION>][bug report]]
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[PATCH\] gnus-bone: <COMMIT SUMMARY>][patch]] (please use =git format-patch=)
+- Send a [[mailto:~bzg/barkyard@lists.sr.ht?subject=\[FR\] gnus-bone: <FEATURE REQUEST>][feature request]]
+- Share any [[mailto:~bzg/barkyard@lists.sr.ht?subject=gnus-bone: <ANYTHING>][other question or idea]]
+
+* License
 
 Copyright © 2026 Bastien Guerry
 
