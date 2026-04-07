@@ -39,8 +39,16 @@
 (declare-function gnus-summary-pop-limit "gnus-sum")
 (declare-function mail-header-id "nnheader")
 
-(defvar gnus-bone-sources-file "~/.config/bone/sources.json"
-  "Path to bone sources.json, a JSON array of reports.json URIs.")
+(defvar gnus-bone-config-file "~/.config/bone/config.edn"
+  "Path to bone config.edn.
+The file is an EDN map with at least these keys:
+  :addresses  vector of email addresses belonging to the user
+  :sources    vector of maps, each with a :url key pointing at a
+              reports.json (local file:// URI or http(s) URL).")
+
+(defvar gnus-bone-addresses nil
+  "List of user email addresses, loaded from `gnus-bone-config-file'.
+Populated by `gnus-bone--load-config'.")
 
 (defface gnus-bone-face
   '((((background light)) :background "#e8e8e8")
@@ -63,11 +71,50 @@ Lighter variant of `hl-line' to avoid clashing."
       (url-unhex-string (substring uri 7))
     uri))
 
+(defun gnus-bone--read-edn-strings (text key)
+  "Return list of strings inside the vector after KEY in EDN TEXT.
+KEY is a string like \":addresses\".  Only top-level double-quoted
+strings within the matched [...] block are returned."
+  (when (string-match
+         (concat (regexp-quote key) "[[:space:]]*\\[\\([^][]*\\)\\]")
+         text)
+    (let ((body (match-string 1 text))
+          (pos 0)
+          (acc nil))
+      (while (string-match "\"\\([^\"]*\\)\"" body pos)
+        (push (match-string 1 body) acc)
+        (setq pos (match-end 0)))
+      (nreverse acc))))
+
+(defun gnus-bone--read-edn-source-urls (text)
+  "Return list of :url strings from the :sources vector in EDN TEXT."
+  (when (string-match
+         ":sources[[:space:]]*\\[\\(\\(?:[^][]\\|\\[[^][]*\\]\\)*\\)\\]"
+         text)
+    (let ((body (match-string 1 text))
+          (pos 0)
+          (acc nil))
+      (while (string-match ":url[[:space:]]*\"\\([^\"]+\\)\"" body pos)
+        (push (match-string 1 body) acc)
+        (setq pos (match-end 0)))
+      (nreverse acc))))
+
+(defun gnus-bone--load-config ()
+  "Load `gnus-bone-config-file' and return a plist (:addresses :sources).
+Also sets `gnus-bone-addresses' as a side effect."
+  (let* ((file (expand-file-name gnus-bone-config-file))
+         (text (with-temp-buffer
+                 (insert-file-contents file)
+                 (buffer-string)))
+         (addresses (gnus-bone--read-edn-strings text ":addresses"))
+         (sources   (gnus-bone--read-edn-source-urls text)))
+    (setq gnus-bone-addresses addresses)
+    (list :addresses addresses :sources sources)))
+
 (defun gnus-bone--load-sources ()
-  "Return list of reports.json paths from `gnus-bone-sources-file'."
-  (let ((json-array-type 'list))
-    (mapcar #'gnus-bone--uri-to-path
-            (json-read-file (expand-file-name gnus-bone-sources-file)))))
+  "Return list of reports.json paths/URLs from `gnus-bone-config-file'."
+  (mapcar #'gnus-bone--uri-to-path
+          (plist-get (gnus-bone--load-config) :sources)))
 
 (defun gnus-bone--http-url-p (source)
   "Return non-nil if SOURCE is an HTTP(S) URL."
