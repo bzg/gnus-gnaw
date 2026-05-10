@@ -62,7 +62,7 @@ Lighter variant of `hl-line' to avoid clashing."
   "Face for right-margin annotations (type, flags, priority, votes)."
   :group 'gnus-bone)
 
-(defconst gnus-bone-supported-bark-format "0.4.0"
+(defconst gnus-bone-supported-bark-format "0.9.0"
   "Minimum supported BONE reports.json bark-format.")
 
 (defun gnus-bone--uri-to-path (uri)
