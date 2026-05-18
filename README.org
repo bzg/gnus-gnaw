@@ -9,7 +9,7 @@ open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.
 
 - =~/.config/bone/config.edn= (an EDN map with =:addresses= and
   =:sources= keys, shared with bone)
-- =gnus-bone= supports =reports.json= bark-format =0.9.0=.
+- =gnus-bone= supports =reports.json= bark-format =0.9.1=.
 
 =gnus-bone= does not depend on [[https://codeberg.org/bzg/bone][bone]]: it reads =config.edn= and
 =reports.json= files directly.  You can use it without installing bone,
