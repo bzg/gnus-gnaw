@@ -26,7 +26,18 @@
 ;;
 ;; M-x gnus-bone RET will limit summary to BARK reports + highlight
 ;; M-x gnus-bone-highlight RET will highlight BARK reports (no limit)
+;; M-x gnus-bone-topic RET filters highlighted reports by topic
 ;; M-x gnus-bone-clear RET will unhighlight and disable auto-rehighlight
+;;
+;; The following commands toggle bone's local marks (kept in
+;; ~/.config/bone/state.edn so they are shared with the bone CLI):
+;;
+;; M-x gnus-bone-mark-read   RET — toggle :read-at on current article
+;; M-x gnus-bone-mark-todo   RET — toggle :todo flag on current article
+;; M-x gnus-bone-mark-sticky RET — toggle :sticky flag on current article
+;;
+;; The annotation gains a leading mark column: '!' = :todo, '*' = :sticky,
+;; 'r' = :read-at (without flag).
 ;;
 ;;; Code:
 
@@ -45,6 +56,13 @@ The file is an EDN map with at least these keys:
   :addresses  vector of email addresses belonging to the user
   :sources    vector of maps, each with a :url key pointing at a
               reports.json (local file:// URI or http(s) URL).")
+
+(defvar gnus-bone-state-file "~/.config/bone/state.edn"
+  "Path to bone's local state file.
+An EDN map keyed by RFC-2822 message-id (with angle brackets).
+Each value is a map with keys :subject :type :author :created and
+optionally :flag (:todo or :sticky) and :read-at (ISO-8601 string).
+The file is shared with the bone CLI; both read and write atomically.")
 
 (defvar gnus-bone-addresses nil
   "List of user email addresses, loaded from `gnus-bone-config-file'.
@@ -159,7 +177,11 @@ A report is open when its status is >= 4."
             (priority     (alist-get 'priority r))
             (votes        (alist-get 'votes r))
             (deadline     (alist-get 'deadline r))
-            (topic        (alist-get 'topic r)))
+            (topic        (alist-get 'topic r))
+            (subject      (alist-get 'subject r))
+            (from         (alist-get 'from r))
+            (from-name    (alist-get 'from-name r))
+            (date         (alist-get 'date r)))
         (when (and mid (numberp status) (>= status 4))
           (let ((flags (concat (if acked "A" "-")
                                (if owned "O" "-")
@@ -174,12 +196,265 @@ A report is open when its status is >= 4."
                                   :priority (or priority 0)
                                   :votes votes
                                   :deadline deadline
-                                  :topic topic))
+                                  :topic topic
+                                  :subject subject
+                                  :from from
+                                  :from-name from-name
+                                  :date date))
                   result)))))))
 
 (defun gnus-bone--load-all-open-reports ()
   "Collect open (message-id . plist) pairs from all sources."
   (mapcan #'gnus-bone--extract-open-reports (gnus-bone--load-sources)))
+
+;; --- Minimal EDN reader/writer for ~/.config/bone/state.edn ---------------
+;;
+;; The state file is a top-level map: string keys (message-ids) → maps with
+;; keyword keys (:subject :type :author :created :read-at :flag).  We parse
+;; into alists so both layers can be inspected with the standard accessors.
+;; Values can be strings, keywords, numbers, booleans, nil, or vectors.
+
+(defun gnus-bone--edn-skip-ws ()
+  (skip-chars-forward " \t\n\r,"))
+
+(defun gnus-bone--edn-read ()
+  "Read one EDN value at point."
+  (gnus-bone--edn-skip-ws)
+  (let ((c (char-after)))
+    (cond
+     ((null c)   (error "gnus-bone EDN: unexpected EOF"))
+     ((eq c ?\") (gnus-bone--edn-read-string))
+     ((eq c ?:)  (gnus-bone--edn-read-keyword))
+     ((eq c ?\{) (gnus-bone--edn-read-map))
+     ((eq c ?\[) (gnus-bone--edn-read-vector))
+     ((or (and (>= c ?0) (<= c ?9))
+          (and (eq c ?-) (let ((d (char-after (1+ (point)))))
+                           (and d (>= d ?0) (<= d ?9)))))
+      (gnus-bone--edn-read-number))
+     (t (gnus-bone--edn-read-symbol)))))
+
+(defun gnus-bone--edn-read-string ()
+  (forward-char 1)
+  (let ((chars nil))
+    (while (not (eq (char-after) ?\"))
+      (let ((c (char-after)))
+        (cond
+         ((null c) (error "gnus-bone EDN: unterminated string"))
+         ((eq c ?\\)
+          (forward-char 1)
+          (let ((esc (char-after)))
+            (unless esc (error "gnus-bone EDN: dangling backslash"))
+            (push (pcase esc
+                    (?n ?\n) (?t ?\t) (?r ?\r)
+                    (?b ?\b) (?f ?\f)
+                    (?\\ ?\\) (?\" ?\")
+                    (?u (forward-char 1)
+                        (let ((hex (buffer-substring-no-properties
+                                    (point) (+ (point) 4))))
+                          (forward-char 3) ; outer loop adds 1 more
+                          (string-to-number hex 16)))
+                    (_ esc))
+                  chars))
+          (forward-char 1))
+         (t (push c chars) (forward-char 1)))))
+    (forward-char 1)
+    (apply #'string (nreverse chars))))
+
+(defun gnus-bone--edn-read-keyword ()
+  (forward-char 1)
+  (let ((start (1- (point))))
+    (skip-chars-forward "a-zA-Z0-9._/?!+*<>=&%$-")
+    (intern (buffer-substring-no-properties start (point)))))
+
+(defun gnus-bone--edn-read-symbol ()
+  (let ((start (point)))
+    (skip-chars-forward "a-zA-Z0-9._/?!+*<>=&%$-")
+    (pcase (buffer-substring-no-properties start (point))
+      ("nil"   nil)
+      ("true"  t)
+      ("false" nil)
+      (s       (intern s)))))
+
+(defun gnus-bone--edn-read-number ()
+  (let ((start (point)))
+    (skip-chars-forward "0-9.eE+-")
+    (string-to-number (buffer-substring-no-properties start (point)))))
+
+(defun gnus-bone--edn-read-map ()
+  (forward-char 1)
+  (let ((acc nil))
+    (gnus-bone--edn-skip-ws)
+    (while (not (eq (char-after) ?\}))
+      (let ((k (gnus-bone--edn-read)))
+        (gnus-bone--edn-skip-ws)
+        (push (cons k (gnus-bone--edn-read)) acc))
+      (gnus-bone--edn-skip-ws))
+    (forward-char 1)
+    (nreverse acc)))
+
+(defun gnus-bone--edn-read-vector ()
+  (forward-char 1)
+  (let ((acc nil))
+    (gnus-bone--edn-skip-ws)
+    (while (not (eq (char-after) ?\]))
+      (push (gnus-bone--edn-read) acc)
+      (gnus-bone--edn-skip-ws))
+    (forward-char 1)
+    (nreverse acc)))
+
+(defun gnus-bone--edn-write-string (s)
+  "Serialize S as an EDN/Clojure string literal.
+Escapes the same set of characters as Clojure's `pr-str' so that the
+output round-trips through bone's EDN reader."
+  (concat "\""
+          (replace-regexp-in-string
+           "[\\\\\"\n\t\r\b\f]"
+           (lambda (m)
+             (pcase (aref m 0)
+               (?\n "\\n") (?\t "\\t") (?\r "\\r")
+               (?\b "\\b") (?\f "\\f")
+               (?\\ "\\\\") (?\" "\\\"")))
+           s t t)
+          "\""))
+
+(defun gnus-bone--edn-write-value (v)
+  (cond
+   ((stringp v)  (gnus-bone--edn-write-string v))
+   ((keywordp v) (symbol-name v))
+   ((eq v t)     "true")
+   ((null v)     "nil")
+   ((numberp v)  (number-to-string v))
+   ((consp v)    (gnus-bone--edn-write-entry v))
+   (t (error "gnus-bone EDN: cannot serialize %S" v))))
+
+(defun gnus-bone--edn-write-entry (entry)
+  "Format an inner state ENTRY (alist with keyword keys) as an EDN map."
+  (if (null entry) "{}"
+    (concat "{"
+            (mapconcat (lambda (kv)
+                         (concat (gnus-bone--edn-write-value (car kv))
+                                 " "
+                                 (gnus-bone--edn-write-value (cdr kv))))
+                       entry ", ")
+            "}")))
+
+;; --- State file I/O -------------------------------------------------------
+
+(defun gnus-bone--read-state ()
+  "Return bone's state.edn as an alist of (mid . inner-alist), or nil."
+  (let ((file (expand-file-name gnus-bone-state-file)))
+    (when (file-readable-p file)
+      (condition-case err
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-min))
+            (gnus-bone--edn-skip-ws)
+            (when (eq (char-after) ?{)
+              (gnus-bone--edn-read-map)))
+        (error
+         (message "gnus-bone: cannot parse %s: %s — using empty state."
+                  file (error-message-string err))
+         nil)))))
+
+(defun gnus-bone--write-state (state)
+  "Write STATE (alist of (mid . inner-alist)) to `gnus-bone-state-file'.
+Matches bone's on-disk format: outer map with one entry per line."
+  (let ((file (expand-file-name gnus-bone-state-file)))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file
+      (if (null state)
+          (insert "{}\n")
+        (insert "{")
+        (let ((first t))
+          (dolist (kv state)
+            (if first (setq first nil) (insert "\n "))
+            (insert (gnus-bone--edn-write-string (car kv)))
+            (insert " ")
+            (insert (gnus-bone--edn-write-entry (cdr kv)))))
+        (insert "}\n")))))
+
+;; --- State transitions (mirror bone's apply-transition) -------------------
+
+(defun gnus-bone--iso-now ()
+  (format-time-string "%Y-%m-%dT%H:%M:%S.%6NZ" nil t))
+
+(defun gnus-bone--author-string (info)
+  "Build \"Name <email>\" from INFO's :from-name and :from, or nil."
+  (let ((n (plist-get info :from-name))
+        (e (plist-get info :from)))
+    (cond
+     ((and n e (not (string-empty-p n))) (concat n " <" e ">"))
+     (e e)
+     (n n))))
+
+(defun gnus-bone--enrich-entry (existing info)
+  "Refresh entry metadata from INFO plist. Only sets fields present in INFO.
+EXISTING is an alist (keyword keys). Returns a new alist."
+  (let ((entry (copy-alist existing)))
+    (dolist (pair '((:subject . :subject)
+                    (:type    . :type)
+                    (:date    . :created)))
+      (when-let* ((v (plist-get info (car pair))))
+        (setf (alist-get (cdr pair) entry) v)))
+    (when-let* ((author (gnus-bone--author-string info)))
+      (setf (alist-get :author entry) author))
+    entry))
+
+(defun gnus-bone--state-put (state mid entry)
+  "Set MID → ENTRY in STATE, preserving order when MID is already present."
+  (if (assoc mid state)
+      (mapcar (lambda (kv) (if (equal (car kv) mid) (cons mid entry) kv))
+              state)
+    (append state (list (cons mid entry)))))
+
+(defun gnus-bone--state-delete (state mid)
+  "Remove MID from STATE."
+  (cl-remove mid state :key #'car :test #'equal))
+
+(defun gnus-bone--alist-dissoc (alist key)
+  "Return a copy of ALIST without KEY."
+  (assq-delete-all key (copy-alist alist)))
+
+(defun gnus-bone--alist-assoc (alist key value)
+  "Return a copy of ALIST with KEY set to VALUE."
+  (let ((e (copy-alist alist)))
+    (setf (alist-get key e) value)
+    e))
+
+(defun gnus-bone--apply-transition (state action mid info)
+  "Toggle ACTION (:read, :todo, :sticky) for MID in STATE.
+INFO is the report's plist (used to enrich the entry on first touch).
+Mirrors the semantics of bone's `apply-transition'."
+  (let* ((base (gnus-bone--enrich-entry (cdr (assoc mid state)) info))
+         (flag (alist-get :flag base))
+         (new
+          (pcase action
+            (:read   (if (alist-get :read-at base)
+                         (gnus-bone--alist-dissoc base :read-at)
+                       (gnus-bone--alist-assoc  base :read-at
+                                                (gnus-bone--iso-now))))
+            (:todo   (if (eq flag :todo)
+                         (gnus-bone--alist-dissoc base :flag)
+                       (gnus-bone--alist-assoc  base :flag :todo)))
+            (:sticky (if (eq flag :sticky)
+                         (gnus-bone--alist-dissoc base :flag)
+                       (gnus-bone--alist-assoc  base :flag :sticky))))))
+    (if (and (null (alist-get :flag    new))
+             (null (alist-get :read-at new)))
+        (gnus-bone--state-delete state mid)
+      (gnus-bone--state-put state mid new))))
+
+(defun gnus-bone--mark-prefix (entry)
+  "Return a single-character mark for state ENTRY.
+\"!\" for :todo, \"*\" for :sticky, \"r\" for :read-at (no flag),
+space otherwise."
+  (let ((flag (cdr (assq :flag entry)))
+        (read (cdr (assq :read-at entry))))
+    (cond
+     ((eq flag :todo)   "!")
+     ((eq flag :sticky) "*")
+     (read              "r")
+     (t                 " "))))
 
 (defun gnus-bone--normalize-mid (mid)
   "Ensure MID is bracketed."
@@ -212,9 +487,13 @@ Increase if you expect votes like [12/34].")
            (diff (float-time (time-subtract dl (current-time)))))
       (ceiling (/ diff 86400.0)))))
 
-(defun gnus-bone--annotation (info)
-  "Build a fixed-width annotation string from report INFO plist."
-  (let* ((type     (gnus-bone--type-letter (plist-get info :type)))
+(defun gnus-bone--annotation (info &optional entry)
+  "Build a fixed-width annotation string from report INFO plist.
+When non-nil, ENTRY is the state.edn alist for this report; its
+mark prefix (':todo', ':sticky', ':read-at') is shown as the
+leftmost column."
+  (let* ((mark     (gnus-bone--mark-prefix entry))
+         (type     (gnus-bone--type-letter (plist-get info :type)))
          (flags    (plist-get info :flags))
          (priority (plist-get info :priority))
          (votes    (plist-get info :votes))
@@ -227,7 +506,8 @@ Increase if you expect votes like [12/34].")
                         (format "[%s]" votes)
                       ""))
          (votes-pad (string-pad votes-str gnus-bone-votes-width))
-         (tag       (concat type " " flags " " pri-str " " dl-pad votes-pad)))
+         (tag       (concat mark " " type " " flags " " pri-str " "
+                            dl-pad votes-pad)))
     tag))
 
 (defun gnus-bone--for-each-summary-mid (fn)
@@ -258,14 +538,16 @@ produce the hash value; defaults to the plist (cdr)."
   "Apply overlays for REPORTS, a list of (message-id . plist).
 The annotation replaces the rightmost columns of each line,
 so it is always visible regardless of margins."
-  (let ((id-map (gnus-bone--build-mid-map reports)))
+  (let ((id-map (gnus-bone--build-mid-map reports))
+        (state  (gnus-bone--read-state)))
     (gnus-bone--for-each-summary-mid
      (lambda (_article mid)
        (let ((info (gethash mid id-map)))
          (when info
-           (let* ((bol     (line-beginning-position))
+           (let* ((entry   (cdr (assoc mid state)))
+                  (bol     (line-beginning-position))
                   (eol     (line-end-position))
-                  (ann-str (gnus-bone--annotation info))
+                  (ann-str (gnus-bone--annotation info entry))
                   (ann-len (length ann-str))
                   (p3      (= 3 (plist-get info :priority)))
                   (face    (if p3 '(gnus-bone-face bold) 'gnus-bone-face))
@@ -347,7 +629,7 @@ Use `gnus-summary-pop-limit' (\\[gnus-summary-pop-limit]) to restore."
   "Return sorted list of unique topics from REPORTS."
   (let ((topics nil))
     (dolist (r reports)
-      (when-let ((topic (plist-get (cdr r) :topic)))
+      (when-let* ((topic (plist-get (cdr r) :topic)))
         (cl-pushnew topic topics :test #'equal)))
     (sort (copy-sequence topics) #'string<)))
 
@@ -372,6 +654,74 @@ Completes over topics found in the BARK JSON sources."
           (gnus-bone--activate filtered articles)
           (message "Limited to %d BARK reports for topic \"%s\"."
                    (length articles) topic))))))
+
+;; --- Marking commands -----------------------------------------------------
+
+(defun gnus-bone--current-mid ()
+  "Return current summary line's normalized message-id, or nil."
+  (when-let* ((article (gnus-summary-article-number))
+              ((numberp article))
+              ((> article 0))
+              (header (gnus-summary-article-header article))
+              (raw    (mail-header-id header)))
+    (gnus-bone--normalize-mid raw)))
+
+(defun gnus-bone--info-for-mid (mid reports)
+  "Return the info plist for normalized MID in REPORTS, or nil."
+  (catch 'found
+    (dolist (r reports)
+      (when (equal (gnus-bone--normalize-mid (car r)) mid)
+        (throw 'found (cdr r))))))
+
+(defun gnus-bone--refresh-overlays ()
+  "Clear and re-apply gnus-bone overlays in the current summary buffer."
+  (when gnus-bone--active-reports
+    (remove-overlays (point-min) (point-max) 'gnus-bone t)
+    (gnus-bone--apply-overlays gnus-bone--active-reports)))
+
+(defun gnus-bone--action-on-p (state mid action)
+  "Return non-nil when ACTION is set for MID in STATE."
+  (let ((entry (cdr (assoc mid state))))
+    (pcase action
+      (:read   (cdr (assq :read-at entry)))
+      (:todo   (eq (cdr (assq :flag entry)) :todo))
+      (:sticky (eq (cdr (assq :flag entry)) :sticky)))))
+
+(defun gnus-bone--mark (action on-msg off-msg)
+  "Toggle ACTION on the current article. Show ON-MSG or OFF-MSG when done."
+  (let* ((reports (or gnus-bone--active-reports
+                      (gnus-bone--load-all-open-reports)))
+         (mid     (and reports (gnus-bone--current-mid)))
+         (info    (and mid (gnus-bone--info-for-mid mid reports))))
+    (cond
+     ((null reports) (user-error "No BARK reports loaded"))
+     ((null mid)     (user-error "No message-id on current line"))
+     ((null info)    (user-error "Current article is not a BARK report: %s" mid))
+     (t
+      (let* ((state (gnus-bone--read-state))
+             (new   (gnus-bone--apply-transition state action mid info)))
+        (gnus-bone--write-state new)
+        (gnus-bone--refresh-overlays)
+        (message "%s" (if (gnus-bone--action-on-p new mid action)
+                          on-msg off-msg)))))))
+
+(defun gnus-bone-mark-read ()
+  "Toggle the :read-at timestamp for the current BARK report.
+Edits bone's `~/.config/bone/state.edn'."
+  (interactive)
+  (gnus-bone--mark :read "Marked read" "Unmarked read"))
+
+(defun gnus-bone-mark-todo ()
+  "Toggle the :todo flag for the current BARK report.
+Edits bone's `~/.config/bone/state.edn'."
+  (interactive)
+  (gnus-bone--mark :todo "Marked TODO" "Unmarked TODO"))
+
+(defun gnus-bone-mark-sticky ()
+  "Toggle the :sticky flag for the current BARK report.
+Edits bone's `~/.config/bone/state.edn'."
+  (interactive)
+  (gnus-bone--mark :sticky "Marked STICKY" "Unmarked STICKY"))
 
 (defun gnus-bone-clear ()
   "Remove all gnus-bone overlays and disable auto-rehighlighting."

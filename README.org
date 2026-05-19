@@ -19,8 +19,21 @@ are available.
 * Commands
 
 - =M-x gnus-bone= — Apply overlays to the current summary buffer.
-- =M-x gnus-bone-clear= — Remove all =gnus-bone= overlays.
+- =M-x gnus-bone-highlight= — Highlight without limiting the summary.
 - =M-x gnus-bone-topic= — Filter reports by selected topic.
+- =M-x gnus-bone-clear= — Remove all =gnus-bone= overlays.
+
+** Local marks
+
+The following commands toggle bone's local marks (stored in
+=~/.config/bone/state.edn= and shared with the [[https://codeberg.org/bzg/bone][bone]] CLI).
+
+- =M-x gnus-bone-mark-read= — toggle the =:read-at= timestamp on the current report.
+- =M-x gnus-bone-mark-todo= — toggle the =:todo= flag.
+- =M-x gnus-bone-mark-sticky= — toggle the =:sticky= flag.
+
+The annotation gains a leading mark column: =!= for =:todo=, =*= for
+=:sticky=, =r= for =:read-at= (no flag), space otherwise.
 
 * Contributing
 
