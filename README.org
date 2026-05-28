@@ -7,14 +7,17 @@ open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.
 
 * Requirements
 
-- =~/.config/bone/config.edn= (an EDN map with =:addresses= and
+- The [[https://codeberg.org/bzg/bone.el][bone.el]] library, which provides the shared data layer
+  (configuration, report cache and =state.edn= handling).  Installing
+  =gnus-bone= from MELPA pulls in this dependency automatically.
+- =~/.config/bone/config.edn= (an EDN map with =:my-addresses= and
   =:sources= keys, shared with bone)
-- =gnus-bone= supports =reports.json= bark-format =0.9.1=.
+- =gnus-bone= supports =reports.json= bark-format =0.9.3=.
 
-=gnus-bone= does not depend on [[https://codeberg.org/bzg/bone][bone]]: it reads =config.edn= and
-=reports.json= files directly.  You can use it without installing bone,
-as long as the configuration file and the report sources it references
-are available.
+=gnus-bone= does not require the [[https://codeberg.org/bzg/bone][bone]] CLI: it reads =config.edn= and
+=reports.json= files directly.  You can use it without installing the
+=bone= binary, as long as the configuration file and the report sources
+it references are available.
 
 * Commands
 
@@ -28,12 +31,11 @@ are available.
 The following commands toggle bone's local marks (stored in
 =~/.config/bone/state.edn= and shared with the [[https://codeberg.org/bzg/bone][bone]] CLI).
 
-- =M-x gnus-bone-mark-read= — toggle the =:read-at= timestamp on the current report.
-- =M-x gnus-bone-mark-todo= — toggle the =:todo= flag.
-- =M-x gnus-bone-mark-sticky= — toggle the =:sticky= flag.
+- =M-x gnus-bone-mark-sticky= — toggle the sticky mark (keep the report visible).
+- =M-x gnus-bone-mark-skip= — toggle the skip mark (hide the report).
 
-The annotation gains a leading mark column: =!= for =:todo=, =*= for
-=:sticky=, =r= for =:read-at= (no flag), space otherwise.
+The annotation gains a leading mark column: =*= for sticky, =_= for
+skip, space otherwise.
 
 * Contributing
 
@@ -46,11 +48,11 @@ You can also [[mailto:bzg@bzg.fr][send me an email]] and support my work on [[ht
 
 * Intentional Versioning
 
-This project uses [[https://intver.org][Intentional Versioning]], here are the three audiences:
+This project uses [[https://intver.org][Intentional Versioning]], with three audiences:
 
-- =x= : end users who use gnus-bone
-- =y= : external packagers
-- =z= : contributors to the codebase
+- =x=: end users
+- =y=: packagers
+- =z=: contributors to the codebase
 
 * License
 

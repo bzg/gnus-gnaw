@@ -1,0 +1,1 @@
+(gnus-bone :fetcher codeberg :repo "bzg/gnus-bone")

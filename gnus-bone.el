@@ -1,4 +1,4 @@
-;;; gnus-bone.el --- highlight BARK reports -*- lexical-binding: t; -*-
+;;; gnus-bone.el --- Highlight BARK reports -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026 Bastien Guerry
 
@@ -6,6 +6,8 @@
 ;; Maintainer: Bastien Guerry <bzg@gnu.org>
 ;; Keywords: news, mail
 ;; URL: https://codeberg.org/bzg/gnus-bone
+;; Version: 0.13.0
+;; Package-Requires: ((emacs "28.1") (bone "0.1"))
 
 ;; This file is not part of GNU Emacs.
 
@@ -28,21 +30,23 @@
 ;; M-x gnus-bone-highlight RET will highlight BARK reports (no limit)
 ;; M-x gnus-bone-topic RET filters highlighted reports by topic
 ;; M-x gnus-bone-clear RET will unhighlight and disable auto-rehighlight
-;; M-x gnus-bone-update-cache RET will force update of remote reports
+;; M-x bone-update RET will force update of the remote reports cache
 ;;
 ;; The following commands toggle bone's local marks (kept in
 ;; ~/.config/bone/state.edn so they are shared with the bone CLI):
 ;;
-;; M-x gnus-bone-mark-read   RET — toggle :read-at on current article
-;; M-x gnus-bone-mark-todo   RET — toggle :todo flag on current article
-;; M-x gnus-bone-mark-sticky RET — toggle :sticky flag on current article
+;; M-x gnus-bone-mark-sticky RET — toggle the sticky mark (keep visible)
+;; M-x gnus-bone-mark-skip RET — toggle the skip mark (hide)
 ;;
-;; The annotation gains a leading mark column: '!' = :todo, '*' = :sticky,
-;; 'r' = :read-at (without flag).
+;; The annotation gains a leading mark column: '*' = sticky, '_' = skip.
+;;
+;; gnus-bone builds on the `bone' library for the shared data layer
+;; (configuration, report sources, cache and state.edn); this file only
+;; provides the Gnus presentation and commands.
 ;;
 ;;; Code:
 
-(require 'json)
+(require 'bone)
 (require 'cl-lib)
 (require 'subr-x)
 (require 'time-date)
@@ -53,26 +57,9 @@
 (declare-function gnus-summary-pop-limit "gnus-sum")
 (declare-function mail-header-id "nnheader")
 
-(defvar url-http-response-status)
-
 (defgroup gnus-bone nil
   "Highlight BARK reports in Gnus summary buffers."
   :group 'gnus)
-
-(defcustom gnus-bone-reports-source nil
-  "Path or URL to a BARK reports.json file.
-If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
-  :type '(choice (const :tag "Use config.edn sources" nil)
-                 (string :tag "Local path or URL"))
-  :group 'gnus-bone)
-
-(defcustom gnus-bone-config-dir "~/.config/bone"
-  "Directory containing bone configuration and state/cache files."
-  :type 'directory
-  :group 'gnus-bone)
-
-(defvar gnus-bone-addresses nil
-  "List of user email addresses loaded from config.")
 
 (defface gnus-bone-face
   '((((background light)) :background "#e8e8e8")
@@ -85,403 +72,16 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
   "Face for right-margin annotations."
   :group 'gnus-bone)
 
-(defconst gnus-bone-supported-bark-format "0.9.1"
-  "Minimum supported BONE reports.json bark-format.")
-
-(defun gnus-bone--uri-to-path (uri)
-  "Convert file:// URI to local path, otherwise return URI."
-  (if (string-prefix-p "file://" uri)
-      (url-unhex-string (substring uri 7))
-    uri))
-
-(defun gnus-bone--read-edn-strings (text key)
-  "Extract list of string values for vector KEY in EDN TEXT."
-  (when (string-match
-         (concat (regexp-quote key) "[[:space:]]*\\[\\([^][]*\\)\\]")
-         text)
-    (let ((body (match-string 1 text))
-          (pos 0)
-          (acc nil))
-      (while (string-match "\"\\([^\"]*\\)\"" body pos)
-        (push (match-string 1 body) acc)
-        (setq pos (match-end 0)))
-      (nreverse acc))))
-
-(defun gnus-bone--read-edn-source-urls (text)
-  "Extract list of :url strings from :sources in EDN TEXT."
-  (when (string-match
-         ":sources[[:space:]]*\\[\\(\\(?:[^][]\\|\\[[^][]*\\]\\)*\\)\\]"
-         text)
-    (let ((body (match-string 1 text))
-          (pos 0)
-          (acc nil))
-      (while (string-match ":url[[:space:]]*\"\\([^\"]+\\)\"" body pos)
-        (push (match-string 1 body) acc)
-        (setq pos (match-end 0)))
-      (nreverse acc))))
-
-(defun gnus-bone--load-config ()
-  "Load config file and return plist (:addresses :sources)."
-  (let* ((file (expand-file-name "config.edn" gnus-bone-config-dir))
-         (text (with-temp-buffer
-                 (insert-file-contents file)
-                 (goto-char (point-min))
-                 (while (re-search-forward "^[ \t]*;.*$" nil t)
-                   (replace-match ""))
-                 (buffer-string)))
-         (addresses (gnus-bone--read-edn-strings text ":addresses"))
-         (sources   (gnus-bone--read-edn-source-urls text)))
-    (setq gnus-bone-addresses addresses)
-    (list :addresses addresses :sources sources)))
-
-(defun gnus-bone--load-sources ()
-  "Return list of reports.json paths or URLs."
-  (mapcar #'gnus-bone--uri-to-path
-          (if gnus-bone-reports-source
-              (list gnus-bone-reports-source)
-            (plist-get (gnus-bone--load-config) :sources))))
-
-(defun gnus-bone--http-url-p (source)
-  "Return non-nil if SOURCE is an HTTP(S) URL."
-  (string-match-p "\\`https?://" source))
-
-(defun gnus-bone--java-hash (str)
-  "Calculate Java String hashCode of STR as an unsigned 32-bit integer."
-  (let ((h 0)
-        (len (length str)))
-    (dotimes (i len)
-      (setq h (logand (+ (* h 31) (aref str i)) #xffffffff)))
-    h))
-
-(defun gnus-bone--source-to-cache-file (src)
-  "Return cache file path for remote source SRC."
-  (let* ((h (format "%08x" (gnus-bone--java-hash src)))
-         (safe (replace-regexp-in-string "[^a-zA-Z0-9._-]" "_" src))
-         (prefix (substring safe 0 (min 80 (length safe)))))
-    (expand-file-name
-     (concat "cache/reports/" prefix "-" h ".json")
-     gnus-bone-config-dir)))
-
-(defun gnus-bone--fetch-json-from-url (url)
-  "Synchronously fetch JSON from URL."
-  (let ((buf (url-retrieve-synchronously url t)))
-    (unless buf (error "gnus-bone: failed to fetch %s" url))
-    (unwind-protect
-        (with-current-buffer buf
-          (goto-char (point-min))
-          (when (and (bound-and-true-p url-http-response-status)
-                     (>= url-http-response-status 400))
-            (error "gnus-bone: HTTP error %d from %s" url-http-response-status url))
-          (unless (re-search-forward "\r?\n\r?\n" nil t)
-            (error "gnus-bone: malformed HTTP response from %s" url))
-          (let ((json-object-type 'alist)
-                (json-array-type 'list))
-            (json-read)))
-      (kill-buffer buf))))
-
-(defun gnus-bone--write-json-to-file (data file)
-  "Write JSON DATA to FILE."
-  (make-directory (file-name-directory file) t)
-  (with-temp-file file
-    (insert (json-encode data))))
-
-(defun gnus-bone--read-json (source)
-  "Read JSON from SOURCE, using local cache for remote URLs if available."
-  (let ((json-object-type 'alist)
-        (json-array-type 'list))
-    (if (gnus-bone--http-url-p source)
-        (let ((cache-file (gnus-bone--source-to-cache-file source)))
-          (if (file-exists-p cache-file)
-              (json-read-file cache-file)
-            (let ((data (gnus-bone--fetch-json-from-url source)))
-              (gnus-bone--write-json-to-file data cache-file)
-              data)))
-      (json-read-file source))))
-
-(defun gnus-bone--normalize-mid (mid)
-  "Ensure MID has angle brackets."
-  (if (string-match-p "^<.*>$" mid)
-      mid
-    (concat "<" mid ">")))
-
-(defun gnus-bone--extract-open-reports (source)
-  "Extract open reports from SOURCE."
-  (let* ((data (gnus-bone--read-json source))
-         (fv (alist-get 'bark-format data))
-         (reports (alist-get 'reports data))
-         (result '()))
-    (when (and fv (version< fv gnus-bone-supported-bark-format))
-      (message "gnus-bone: %s has format %s, min supported is %s"
-               source fv gnus-bone-supported-bark-format))
-    (dolist (r reports result)
-      (let ((mid          (alist-get 'message-id r))
-            (status       (alist-get 'status r))
-            (type         (alist-get 'type r))
-            (acked        (alist-get 'acked r))
-            (owned        (alist-get 'owned r))
-            (closed       (alist-get 'closed r))
-            (close-reason (alist-get 'close-reason r))
-            (priority     (alist-get 'priority r))
-            (votes        (alist-get 'votes r))
-            (deadline     (alist-get 'deadline r))
-            (topic        (alist-get 'topic r))
-            (subject      (alist-get 'subject r))
-            (from         (alist-get 'from r))
-            (from-name    (alist-get 'from-name r))
-            (date         (alist-get 'date r)))
-        (when (and mid (numberp status) (>= status 4))
-          (let ((flags (concat (if acked "A" "-")
-                               (if owned "O" "-")
-                               (pcase close-reason
-                                 ("canceled"   "C")
-                                 ("resolved"   "R")
-                                 ("expired"    "E")
-                                 ("superseded" "S")
-                                 (_ (if closed "R" "-")))))
-                (norm-mid (gnus-bone--normalize-mid mid)))
-            (push (cons norm-mid (list :type (or type "bug")
-                                       :flags flags
-                                       :priority (or priority 0)
-                                       :votes votes
-                                       :deadline deadline
-                                       :topic topic
-                                       :subject subject
-                                       :from from
-                                       :from-name from-name
-                                       :date date))
-                  result)))))))
-
-(defun gnus-bone--load-all-open-reports ()
-  "Collect open report pairs from all sources, tolerating failures."
-  (let ((result nil))
-    (dolist (source (gnus-bone--load-sources))
-      (condition-case err
-          (setq result (append result (gnus-bone--extract-open-reports source)))
-        (error
-         (message "gnus-bone: failed loading source %s: %s"
-                  source (error-message-string err)))))
-    result))
-
-(defun gnus-bone-update-cache ()
-  "Force-refresh the local cache from remote JSON sources."
-  (interactive)
-  (let ((sources (gnus-bone--load-sources))
-        (count 0))
-    (dolist (source sources)
-      (when (gnus-bone--http-url-p source)
-        (message "gnus-bone: updating cache for %s..." source)
-        (condition-case err
-            (let ((data (gnus-bone--fetch-json-from-url source))
-                  (cache-file (gnus-bone--source-to-cache-file source)))
-              (gnus-bone--write-json-to-file data cache-file)
-              (setq count (1+ count))
-              (message "gnus-bone: cache updated for %s" source))
-          (error
-           (message "gnus-bone: failed updating %s: %s"
-                    source (error-message-string err))))))
-    (message "gnus-bone: cache update finished (%d updated)." count)))
-
-;; --- EDN reader/writer for ~/.config/bone/state.edn -----------------------
-
-(defun gnus-bone--edn-skip-ws ()
-  (skip-chars-forward " \t\n\r,"))
-
-(defun gnus-bone--edn-read ()
-  "Read one EDN value at point."
-  (gnus-bone--edn-skip-ws)
-  (let ((c (char-after)))
-    (cond
-     ((null c)   (error "gnus-bone EDN: unexpected EOF"))
-     ((eq c ?\") (read (current-buffer)))
-     ((eq c ?:)  (gnus-bone--edn-read-keyword))
-     ((eq c ?\{) (gnus-bone--edn-read-map))
-     ((eq c ?\[) (gnus-bone--edn-read-vector))
-     ((or (and (>= c ?0) (<= c ?9))
-          (and (eq c ?-) (let ((d (char-after (1+ (point)))))
-                            (and d (>= d ?0) (<= d ?9)))))
-      (gnus-bone--edn-read-number))
-     (t (gnus-bone--edn-read-symbol)))))
-
-(defun gnus-bone--edn-read-keyword ()
-  (forward-char 1)
-  (let ((start (1- (point))))
-    (skip-chars-forward "a-zA-Z0-9._/?!+*<>=&%$-")
-    (intern (buffer-substring-no-properties start (point)))))
-
-(defun gnus-bone--edn-read-symbol ()
-  (let ((start (point)))
-    (skip-chars-forward "a-zA-Z0-9._/?!+*<>=&%$-")
-    (pcase (buffer-substring-no-properties start (point))
-      ("nil"   nil)
-      ("true"  t)
-      ("false" nil)
-      (s       (intern s)))))
-
-(defun gnus-bone--edn-read-number ()
-  (let ((start (point)))
-    (skip-chars-forward "0-9.eE+-")
-    (string-to-number (buffer-substring-no-properties start (point)))))
-
-(defun gnus-bone--edn-read-map ()
-  (forward-char 1)
-  (let ((acc nil))
-    (gnus-bone--edn-skip-ws)
-    (while (not (eq (char-after) ?\}))
-      (let ((k (gnus-bone--edn-read)))
-        (gnus-bone--edn-skip-ws)
-        (push (cons k (gnus-bone--edn-read)) acc))
-      (gnus-bone--edn-skip-ws))
-    (forward-char 1)
-    (nreverse acc)))
-
-(defun gnus-bone--edn-read-vector ()
-  (forward-char 1)
-  (let ((acc nil))
-    (gnus-bone--edn-skip-ws)
-    (while (not (eq (char-after) ?\]))
-      (push (gnus-bone--edn-read) acc)
-      (gnus-bone--edn-skip-ws))
-    (forward-char 1)
-    (nreverse acc)))
-
-(defun gnus-bone--edn-write-string (s)
-  "Format string S as an EDN string."
-  (format "%S" s))
-
-(defun gnus-bone--edn-write-value (v)
-  (cond
-   ((stringp v)  (gnus-bone--edn-write-string v))
-   ((keywordp v) (symbol-name v))
-   ((eq v t)     "true")
-   ((null v)     "nil")
-   ((numberp v)  (number-to-string v))
-   ((consp v)    (gnus-bone--edn-write-entry v))
-   (t (error "gnus-bone EDN: cannot serialize %S" v))))
-
-(defun gnus-bone--edn-write-entry (entry)
-  "Format entry as an EDN map."
-  (if (null entry) "{}"
-    (concat "{"
-            (mapconcat (lambda (kv)
-                         (concat (gnus-bone--edn-write-value (car kv))
-                                 " "
-                                 (gnus-bone--edn-write-value (cdr kv))))
-                       entry ", ")
-            "}")))
-
-;; --- State file I/O -------------------------------------------------------
-
-(defun gnus-bone--read-state ()
-  "Read state file."
-  (let ((file (expand-file-name "state.edn" gnus-bone-config-dir)))
-    (when (file-readable-p file)
-      (condition-case err
-          (with-temp-buffer
-            (insert-file-contents file)
-            (goto-char (point-min))
-            (gnus-bone--edn-skip-ws)
-            (when (eq (char-after) ?{)
-              (gnus-bone--edn-read-map)))
-        (error
-         (message "gnus-bone: cannot parse %s: %s"
-                  file (error-message-string err))
-         nil)))))
-
-(defun gnus-bone--write-state (state)
-  "Write STATE to state file."
-  (let ((file (expand-file-name "state.edn" gnus-bone-config-dir)))
-    (make-directory (file-name-directory file) t)
-    (with-temp-file file
-      (if (null state)
-          (insert "{}\n")
-        (insert "{")
-        (let ((first t))
-          (dolist (kv state)
-            (if first (setq first nil) (insert "\n "))
-            (insert (gnus-bone--edn-write-string (car kv)))
-            (insert " ")
-            (insert (gnus-bone--edn-write-entry (cdr kv)))))
-        (insert "}\n")))))
-
-;; --- State transitions ----------------------------------------------------
-
-(defun gnus-bone--iso-now ()
-  (format-time-string "%Y-%m-%dT%H:%M:%S.%6NZ" nil t))
-
-(defun gnus-bone--author-string (info)
-  "Build author string from INFO."
-  (let ((n (plist-get info :from-name))
-        (e (plist-get info :from)))
-    (cond
-     ((and n e (not (string= n ""))) (concat n " <" e ">"))
-     (e e)
-     (n n))))
-
-(defun gnus-bone--enrich-entry (existing info)
-  "Refresh metadata from INFO in EXISTING."
-  (let ((entry (copy-alist existing)))
-    (dolist (pair '((:subject . :subject)
-                    (:type    . :type)
-                    (:date    . :created)))
-      (let ((v (plist-get info (car pair))))
-        (when v
-          (setf (alist-get (cdr pair) entry) v))))
-    (let ((author (gnus-bone--author-string info)))
-      (when author
-        (setf (alist-get :author entry) author)))
-    entry))
-
-(defun gnus-bone--state-put (state mid entry)
-  "Set MID to ENTRY in STATE, keeping order."
-  (if (assoc mid state)
-      (mapcar (lambda (kv) (if (equal (car kv) mid) (cons mid entry) kv))
-              state)
-    (append state (list (cons mid entry)))))
-
-(defun gnus-bone--state-delete (state mid)
-  "Remove MID from STATE."
-  (cl-remove mid state :key #'car :test #'equal))
-
-(defun gnus-bone--alist-dissoc (alist key)
-  "Remove KEY from ALIST copy."
-  (assq-delete-all key (copy-alist alist)))
-
-(defun gnus-bone--alist-assoc (alist key value)
-  "Set KEY to VALUE in ALIST copy."
-  (let ((e (copy-alist alist)))
-    (setf (alist-get key e) value)
-    e))
-
-(defun gnus-bone--apply-transition (state action mid info)
-  "Apply ACTION transition for MID in STATE."
-  (let* ((base (gnus-bone--enrich-entry (cdr (assoc mid state)) info))
-         (flag (alist-get :flag base))
-         (new
-          (pcase action
-            (:read   (if (alist-get :read-at base)
-                         (gnus-bone--alist-dissoc base :read-at)
-                       (gnus-bone--alist-assoc  base :read-at
-                                                 (gnus-bone--iso-now))))
-            (:todo   (if (eq flag :todo)
-                         (gnus-bone--alist-dissoc base :flag)
-                       (gnus-bone--alist-assoc  base :flag :todo)))
-            (:sticky (if (eq flag :sticky)
-                         (gnus-bone--alist-dissoc base :flag)
-                       (gnus-bone--alist-assoc  base :flag :sticky))))))
-    (if (and (null (alist-get :flag    new))
-             (null (alist-get :read-at new)))
-        (gnus-bone--state-delete state mid)
-      (gnus-bone--state-put state mid new))))
+;;; Annotation rendering
 
 (defun gnus-bone--mark-prefix (entry)
   "Get mark char for state ENTRY."
   (let ((flag (cdr (assq :flag entry)))
-        (read (cdr (assq :read-at entry))))
+        (skip (cdr (assq :skip-since entry))))
     (cond
-     ((eq flag :todo)   "!")
      ((eq flag :sticky) "*")
-     (read              "r")
-     (t                 " "))))
+     (skip            "_")
+     (t               " "))))
 
 (defvar gnus-bone-votes-width 7
   "Fixed width for votes column.")
@@ -525,6 +125,8 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
                              dl-pad votes-pad)))
     tag))
 
+;;; Summary overlays
+
 (defun gnus-bone--for-each-summary-mid (fn)
   "Map FN over article numbers and MIDs in summary buffer."
   (save-excursion
@@ -538,7 +140,8 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
       (forward-line 1))))
 
 (defun gnus-bone--build-mid-map (reports &optional value-fn)
-  "Build map of normalized MIDs to report info."
+  "Build a hash of normalized MIDs to report info for REPORTS.
+Use VALUE-FN to compute each value when given, else the report info."
   (let ((id-map (make-hash-table :test 'equal)))
     (dolist (r reports)
       (puthash (car r)
@@ -550,7 +153,7 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
   "Apply overlays for BARK REPORTS in the current summary buffer."
   (remove-overlays (point-min) (point-max) 'gnus-bone t)
   (let ((id-map (gnus-bone--build-mid-map reports))
-        (state  (gnus-bone--read-state)))
+        (state  (bone-read-state)))
     (gnus-bone--for-each-summary-mid
      (lambda (_article mid)
        (let ((info (gethash mid id-map)))
@@ -592,17 +195,19 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
   (remove-hook 'gnus-summary-update-hook #'gnus-bone--rehighlight t))
 
 (defun gnus-bone--activate (reports &optional limit-articles)
-  "Activate reports, optionally limiting summary first."
+  "Activate REPORTS, optionally limiting summary to LIMIT-ARTICLES first."
   (when limit-articles (gnus-summary-limit limit-articles))
   (gnus-bone-clear)
   (setq gnus-bone--active-reports reports)
   (gnus-bone--apply-overlays reports)
   (gnus-bone--enable-hooks))
 
+;;; Commands
+
 (defun gnus-bone-highlight ()
   "Highlight summary lines of open BARK reports."
   (interactive)
-  (let ((reports (gnus-bone--load-all-open-reports)))
+  (let ((reports (bone-reports)))
     (if (null reports)
         (message "No open BARK reports found.")
       (gnus-bone--activate reports)
@@ -621,7 +226,7 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
 (defun gnus-bone ()
   "Limit summary to open BARK reports and highlight them."
   (interactive)
-  (let ((reports (gnus-bone--load-all-open-reports)))
+  (let ((reports (bone-reports)))
     (if (null reports)
         (message "No open BARK reports found.")
       (let ((articles (gnus-bone--matching-articles reports)))
@@ -640,27 +245,34 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
     (sort (copy-sequence topics) #'string<)))
 
 (defun gnus-bone--filter-by-topic (reports topic)
-  "Reports matching TOPIC."
+  "Return REPORTS matching TOPIC."
   (cl-remove-if-not (lambda (r) (equal (plist-get (cdr r) :topic) topic))
                     reports))
 
 (defun gnus-bone-topic ()
   "Limit summary to reports of selected topic and highlight them."
   (interactive)
-  (let* ((reports (gnus-bone--load-all-open-reports))
-         (topics  (gnus-bone--collect-topics reports))
-         (topic   (completing-read "BARK topic: " topics nil t)))
-    (if (string= topic "")
-        (message "No topic selected.")
-      (let* ((filtered (gnus-bone--filter-by-topic reports topic))
-             (articles (and filtered (gnus-bone--matching-articles filtered))))
-        (if (null articles)
-            (message "No matching articles for topic \"%s\"." topic)
-          (gnus-bone--activate filtered articles)
-          (message "Limited to %d BARK reports for topic \"%s\"."
-                   (length articles) topic))))))
+  (let* ((reports (bone-reports))
+         (topics  (gnus-bone--collect-topics reports)))
+    (cond
+     ((null reports) (message "No open BARK reports found."))
+     ((null topics)  (message "No topics in any report."))
+     (t
+      (let* ((topic    (completing-read "BARK topic: " topics nil t))
+             (filtered (and (not (string= topic ""))
+                            (gnus-bone--filter-by-topic reports topic))))
+        (cond
+         ((or (string= topic "") (null filtered))
+          (message "No reports for topic \"%s\"." topic))
+         (t
+          (let ((articles (gnus-bone--matching-articles filtered)))
+            (if (null articles)
+                (message "No matching articles for topic \"%s\"." topic)
+              (gnus-bone--activate filtered articles)
+              (message "Limited to %d BARK reports for topic \"%s\"."
+                       (length articles) topic))))))))))
 
-;; --- Marking commands -----------------------------------------------------
+;;; Marking commands
 
 (defun gnus-bone--current-mid ()
   "Current article's normalized MID, or nil."
@@ -669,7 +281,7 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
       (let* ((header (gnus-summary-article-header article))
              (raw    (and header (mail-header-id header))))
         (when raw
-          (gnus-bone--normalize-mid raw))))))
+          (bone-normalize-mid raw))))))
 
 (defun gnus-bone--info-for-mid (mid reports)
   "Return info plist for MID in REPORTS."
@@ -680,18 +292,9 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
   (when gnus-bone--active-reports
     (gnus-bone--apply-overlays gnus-bone--active-reports)))
 
-(defun gnus-bone--action-on-p (state mid action)
-  "Check if ACTION is set for MID in STATE."
-  (let ((entry (cdr (assoc mid state))))
-    (pcase action
-      (:read   (cdr (assq :read-at entry)))
-      (:todo   (eq (cdr (assq :flag entry)) :todo))
-      (:sticky (eq (cdr (assq :flag entry)) :sticky)))))
-
 (defun gnus-bone--mark (action on-msg off-msg)
-  "Toggle ACTION mark, showing ON-MSG or OFF-MSG."
-  (let* ((reports (or gnus-bone--active-reports
-                      (gnus-bone--load-all-open-reports)))
+  "Toggle ACTION mark on the current report, showing ON-MSG or OFF-MSG."
+  (let* ((reports (or gnus-bone--active-reports (bone-reports)))
          (mid     (and reports (gnus-bone--current-mid)))
          (info    (and mid (gnus-bone--info-for-mid mid reports))))
     (cond
@@ -699,27 +302,19 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
      ((null mid)     (user-error "No message-id on current line"))
      ((null info)    (user-error "Current article is not a BARK report: %s" mid))
      (t
-      (let* ((state (gnus-bone--read-state))
-             (new   (gnus-bone--apply-transition state action mid info)))
-        (gnus-bone--write-state new)
+      (let ((on (bone-toggle-mark mid info action)))
         (gnus-bone--refresh-overlays)
-        (message "%s" (if (gnus-bone--action-on-p new mid action)
-                          on-msg off-msg)))))))
-
-(defun gnus-bone-mark-read ()
-  "Toggle :read-at timestamp for current report."
-  (interactive)
-  (gnus-bone--mark :read "Marked read" "Unmarked read"))
-
-(defun gnus-bone-mark-todo ()
-  "Toggle :todo flag for current report."
-  (interactive)
-  (gnus-bone--mark :todo "Marked TODO" "Unmarked TODO"))
+        (message "%s" (if on on-msg off-msg)))))))
 
 (defun gnus-bone-mark-sticky ()
-  "Toggle :sticky flag for current report."
+  "Toggle the sticky mark (keep visible) for the current report."
   (interactive)
-  (gnus-bone--mark :sticky "Marked STICKY" "Unmarked STICKY"))
+  (gnus-bone--mark :sticky "Marked sticky" "Unmarked sticky"))
+
+(defun gnus-bone-mark-skip ()
+  "Toggle the skip mark (hide) for the current report."
+  (interactive)
+  (gnus-bone--mark :skip "Skipped" "Unskipped"))
 
 (defun gnus-bone-clear ()
   "Remove all gnus-bone overlays."
@@ -727,6 +322,20 @@ If nil, load sources configured in config.edn under `gnus-bone-config-dir'."
   (remove-overlays (point-min) (point-max) 'gnus-bone t)
   (setq gnus-bone--active-reports nil)
   (gnus-bone--disable-hooks))
+
+;; --- Cache update hooks ----------------------------------------------------
+
+(defun gnus-bone--refresh-all-buffers ()
+  "Re-apply overlays in active summary buffers from the refreshed cache."
+  (let ((reports (bone-reports)))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (derived-mode-p 'gnus-summary-mode)
+                   gnus-bone--active-reports)
+          (setq gnus-bone--active-reports reports)
+          (gnus-bone--apply-overlays reports))))))
+
+(add-hook 'bone-after-update-hook #'gnus-bone--refresh-all-buffers)
 
 (provide 'gnus-bone)
 ;;; gnus-bone.el ends here
