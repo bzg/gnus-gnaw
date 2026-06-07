@@ -26,6 +26,9 @@
 ;;
 ;;; Commentary:
 ;;
+;; This library is not actively maintained, it is shared as a proof of
+;; concept.  If you want to maintain and develop it, please contact me.
+;;
 ;; M-x gnus-gnaw RET will limit summary to BONE reports + highlight
 ;; M-x gnus-gnaw-highlight RET will highlight BONE reports (no limit)
 ;; M-x gnus-gnaw-topic RET filters highlighted reports by topic
