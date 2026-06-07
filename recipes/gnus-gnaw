@@ -1,0 +1,1 @@
+(gnus-gnaw :fetcher codeberg :repo "bzg/gnus-gnaw")
