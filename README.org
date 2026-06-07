@@ -8,11 +8,33 @@ open [[https://codeberg.org/bzg/bark][BARK]] report. It reads the same =reports.
 * Requirements
 
 - The [[https://codeberg.org/bzg/bone.el][bone.el]] library, which provides the shared data layer
-  (configuration, report cache and =state.edn= handling).  Installing
-  =gnus-bone= from MELPA pulls in this dependency automatically.
+  (configuration, report cache and =state.edn= handling).  Once
+  =gnus-bone= is on MELPA this dependency will be pulled in
+  automatically; until then, see /Installation/ below.
 - =~/.config/bone/config.edn= (an EDN map with =:my-addresses= and
   =:sources= keys, shared with bone)
 - =gnus-bone= supports =reports.json= bark-format =0.9.3=.
+
+* Installation
+
+=gnus-bone= is not on MELPA yet.  On Emacs 30 or later, install it from
+git with the built-in =package-vc=.  Install [[https://codeberg.org/bzg/bone.el][bone.el]] *first*, since it
+is its dependency and is not in any package archive:
+
+#+begin_src emacs-lisp
+(use-package bone
+  :vc (:url "https://codeberg.org/bzg/bone.el" :rev :newest))
+
+(use-package gnus-bone
+  :vc (:url "https://codeberg.org/bzg/gnus-bone" :rev :newest))
+#+end_src
+
+Or interactively, in order:
+
+: M-x package-vc-install RET https://codeberg.org/bzg/bone.el RET
+: M-x package-vc-install RET https://codeberg.org/bzg/gnus-bone RET
+
+Update later with =M-x package-vc-upgrade=.
 
 =gnus-bone= does not require the [[https://codeberg.org/bzg/bone][bone]] CLI: it reads =config.edn= and
 =reports.json= files directly.  You can use it without installing the
